@@ -1,0 +1,133 @@
+import Foundation
+import CryptoKit
+
+struct Token: Codable {
+    var accessToken: String
+    var refreshToken: String
+    var expiresAt: Date
+
+    var needsRefresh: Bool { expiresAt.timeIntervalSinceNow < 300 }
+
+    static func load() -> Token? {
+        Keychain.load().flatMap { try? JSONDecoder().decode(Token.self, from: $0) }
+    }
+
+    func save() {
+        if let data = try? JSONEncoder().encode(self) { Keychain.save(data) }
+    }
+}
+
+enum OAuthError: LocalizedError {
+    case exchangeFailed(String)
+    var errorDescription: String? {
+        if case .exchangeFailed(let msg) = self { return msg }
+        return nil
+    }
+}
+
+enum OAuth {
+    static let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+    static let redirectURI = "https://platform.claude.com/oauth/code/callback"
+    static let tokenURL = URL(string: "https://console.anthropic.com/v1/oauth/token")!
+    static let scope = "user:profile"
+
+    struct PKCE {
+        let verifier: String
+        let challenge: String
+        let state: String
+
+        init() {
+            verifier = Self.randomURLSafe()
+            challenge = Data(SHA256.hash(data: Data(verifier.utf8))).base64URL()
+            state = Self.randomURLSafe()
+        }
+
+        static func randomURLSafe() -> String {
+            var bytes = [UInt8](repeating: 0, count: 32)
+            _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+            return Data(bytes).base64URL()
+        }
+    }
+
+    static func authorizeURL(_ pkce: PKCE) -> URL {
+        var c = URLComponents(string: "https://claude.ai/oauth/authorize")!
+        c.queryItems = [
+            .init(name: "code", value: "true"),
+            .init(name: "client_id", value: clientID),
+            .init(name: "response_type", value: "code"),
+            .init(name: "redirect_uri", value: redirectURI),
+            .init(name: "scope", value: scope),
+            .init(name: "code_challenge", value: pkce.challenge),
+            .init(name: "code_challenge_method", value: "S256"),
+            .init(name: "state", value: pkce.state),
+        ]
+        return c.url!
+    }
+
+    /// The callback page shows the code as "code#state" — accept either form.
+    static func exchange(pastedCode: String, pkce: PKCE) async throws -> Token {
+        let parts = pastedCode.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "#")
+        let code = String(parts[0])
+        let state = parts.count > 1 ? String(parts[1]) : pkce.state
+        let body: [String: String] = [
+            "grant_type": "authorization_code",
+            "code": code,
+            "state": state,
+            "client_id": clientID,
+            "redirect_uri": redirectURI,
+            "code_verifier": pkce.verifier,
+        ]
+        return try await requestToken(body)
+    }
+
+    static func refresh(_ token: Token) async throws -> Token {
+        try await requestToken([
+            "grant_type": "refresh_token",
+            "refresh_token": token.refreshToken,
+            "client_id": clientID,
+        ])
+    }
+
+    private static func requestToken(_ body: [String: String]) async throws -> Token {
+        var req = URLRequest(url: tokenURL)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(body)
+        var (data, resp) = try await URLSession.shared.data(for: req)
+
+        // ponytail: some deployments want form-encoded instead of JSON — retry once
+        if (resp as? HTTPURLResponse)?.statusCode ?? 500 >= 400 {
+            req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            req.httpBody = body.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? $0.value)" }
+                .joined(separator: "&").data(using: .utf8)
+            (data, resp) = try await URLSession.shared.data(for: req)
+        }
+
+        guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
+            throw OAuthError.exchangeFailed(String(data: data, encoding: .utf8) ?? "token exchange failed")
+        }
+
+        struct TokenResponse: Decodable {
+            let access_token: String
+            let refresh_token: String?
+            let expires_in: Double
+        }
+        let tr = try JSONDecoder().decode(TokenResponse.self, from: data)
+        let token = Token(
+            accessToken: tr.access_token,
+            refreshToken: tr.refresh_token ?? body["refresh_token"] ?? "",
+            expiresAt: Date().addingTimeInterval(tr.expires_in)
+        )
+        token.save()
+        return token
+    }
+}
+
+extension Data {
+    func base64URL() -> String {
+        base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}
