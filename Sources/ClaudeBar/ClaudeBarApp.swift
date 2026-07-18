@@ -4,10 +4,6 @@ import SwiftUI
 struct ClaudeBarApp: App {
     @StateObject private var model = UsageModel()
 
-    init() {
-        Screenshot.runIfRequested()
-    }
-
     var body: some Scene {
         MenuBarExtra {
             MenuView(model: model)
