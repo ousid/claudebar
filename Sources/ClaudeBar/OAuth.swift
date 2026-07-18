@@ -44,7 +44,9 @@ enum OAuth {
 
         static func randomURLSafe() -> String {
             var bytes = [UInt8](repeating: 0, count: 32)
-            _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+            guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+                fatalError("Secure random generator unavailable") // fail closed — never proceed with a predictable PKCE verifier
+            }
             return Data(bytes).base64URL()
         }
     }
@@ -64,15 +66,21 @@ enum OAuth {
         return c.url!
     }
 
-    /// The callback page shows the code as "code#state" — accept either form.
+    /// The callback page shows the code as "code#state" — accept either form,
+    /// but a pasted state MUST match the one we generated (rejects injected codes).
     static func exchange(pastedCode: String, pkce: PKCE) async throws -> Token {
         let parts = pastedCode.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "#")
-        let code = String(parts[0])
-        let state = parts.count > 1 ? String(parts[1]) : pkce.state
+        guard let first = parts.first, !first.isEmpty else {
+            throw OAuthError.exchangeFailed("That code looks empty — copy it from the callback page and try again.")
+        }
+        if parts.count > 1, String(parts[1]) != pkce.state {
+            throw OAuthError.exchangeFailed("Authorization state mismatch — please restart the connect flow.")
+        }
+        let code = String(first)
         let body: [String: String] = [
             "grant_type": "authorization_code",
             "code": code,
-            "state": state,
+            "state": pkce.state,
             "client_id": clientID,
             "redirect_uri": redirectURI,
             "code_verifier": pkce.verifier,
@@ -104,7 +112,8 @@ enum OAuth {
         }
 
         guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
-            throw OAuthError.exchangeFailed(String(data: data, encoding: .utf8) ?? "token exchange failed")
+            let msg = String(data: data, encoding: .utf8) ?? "token exchange failed"
+            throw OAuthError.exchangeFailed(String(msg.prefix(200))) // cap reflected server output
         }
 
         struct TokenResponse: Decodable {
