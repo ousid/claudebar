@@ -44,9 +44,14 @@ struct MenuView: View {
                             .font(.subheadline.monospacedDigit().weight(.medium))
                             .foregroundStyle(w.utilization >= 70 ? w.color : .primary)
                     }
-                    ProgressView(value: min(w.utilization, 100), total: 100)
-                        .tint(w.color)
-                        .controlSize(.small)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(.quaternary)
+                            Capsule().fill(w.color)
+                                .frame(width: geo.size.width * min(w.utilization, 100) / 100)
+                        }
+                    }
+                    .frame(height: 4)
                     if let reset = w.resetText {
                         Text(reset).font(.caption).foregroundStyle(.secondary)
                     }
@@ -96,12 +101,18 @@ struct MenuView: View {
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Toggle("Launch at login", isOn: $launchAtLogin)
-                .font(.caption)
-                .toggleStyle(.checkbox)
-                .onChange(of: launchAtLogin) { on in
-                    try? on ? SMAppService.mainApp.register() : SMAppService.mainApp.unregister()
+            Button {
+                launchAtLogin.toggle()
+                try? launchAtLogin ? SMAppService.mainApp.register() : SMAppService.mainApp.unregister()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: launchAtLogin ? "checkmark.square.fill" : "square")
+                    Text("Launch at login")
                 }
+            }
+            .buttonStyle(.plain)
+            .font(.caption)
+            .foregroundStyle(.secondary)
             HStack(spacing: 12) {
                 footerButton("Refresh") { Task { await model.refresh() } }
                 footerButton("Dashboard") {
